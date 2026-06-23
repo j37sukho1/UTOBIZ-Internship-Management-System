@@ -39,6 +39,33 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
   const [nextPlanInput, setNextPlanInput] = useState('');
   const [remarksInput, setRemarksInput] = useState('');
 
+  // 일일 업무보고 다중 작업 상태 관리 (동일 날짜 여러 과업의 결과 및 상태 취합용)
+  const [reportTasks, setReportTasks] = useState<Task[]>([]);
+
+  // Load/synchronize reportTasks for the combined report on report view
+  useEffect(() => {
+    if (taskDateInput) {
+      const filtered = myTasks.filter(t => t.task_date === taskDateInput);
+      if (filtered.length > 0) {
+        setReportTasks(filtered.map(t => ({ ...t })));
+      } else {
+        setReportTasks([{
+          title: titleInput || '배정 과제명 없음',
+          content: contentInput || '',
+          status: statusInput || '대기중',
+          task_date: taskDateInput,
+          start_time: startTimeInput ? `${startTimeInput}:00` : '09:00:00',
+          end_time: endTimeInput ? `${endTimeInput}:00` : '18:00:00',
+          result: resultInput || '',
+          next_plan: '',
+          remarks: ''
+        }]);
+      }
+    } else {
+      setReportTasks([]);
+    }
+  }, [taskDateInput, myTasks]);
+
   // 1. 나에게 할당된 모든 일정/과업 로드
   const fetchMyData = async () => {
     setLoading(true);
@@ -111,48 +138,71 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
       alert('과제 일정 날짜를 반드시 지정해 주세요.');
       return;
     }
-    if (!titleInput.trim()) {
-      alert('프로젝트(과제)명을 입력해 주세요.');
-      return;
-    }
 
     setLoading(true);
     try {
-      // 혹시 해당 날짜로 이미 저장된 과업이 존재하는지 로컬/서버 매칭 체크
-      // 동일 assigned_to 및 task_date 기준으로 중복 충돌을 방지하기 위한 lookup 또는 upsert 처리
-      let targetId = activeTask?.id;
+      if (activeTab === 'report') {
+        // Save all tasks in reportTasks
+        const payLoads = reportTasks.map(t => {
+          const item: Task = {
+            ...t,
+            task_date: taskDateInput,
+            assigned_to: userProfile.user_id,
+            next_plan: nextPlanInput.trim() || undefined,
+            remarks: remarksInput.trim() || undefined,
+          };
+          return item;
+        });
 
-      if (!targetId) {
-        // 동일 날짜에 기 등록된 일정이 있는지 찾아서 병합
-        const existing = myTasks.find(t => t.task_date === taskDateInput);
-        if (existing) {
-          targetId = existing.id;
+        const { data, error } = await supabase
+          .from('tasks')
+          .upsert(payLoads)
+          .select();
+
+        if (error) throw error;
+      } else {
+        if (!titleInput.trim()) {
+          alert('프로젝트(과제)명을 입력해 주세요.');
+          setLoading(false);
+          return;
         }
+
+        // 혹시 해당 날짜로 이미 저장된 과업이 존재하는지 로컬/서버 매칭 체크
+        // 동일 assigned_to 및 task_date 기준으로 중복 충돌을 방지하기 위한 lookup 또는 upsert 처리
+        let targetId = activeTask?.id;
+
+        if (!targetId) {
+          // 동일 날짜에 기 등록된 일정이 있는지 찾아서 병합
+          const existing = myTasks.find(t => t.task_date === taskDateInput);
+          if (existing) {
+            targetId = existing.id;
+          }
+        }
+
+        const savePayload: Task = {
+          title: titleInput.trim(),
+          content: contentInput.trim(),
+          assigned_to: userProfile.user_id,
+          status: statusInput,
+          task_date: taskDateInput,
+          start_time: startTimeInput ? `${startTimeInput}:00` : undefined,
+          end_time: endTimeInput ? `${endTimeInput}:00` : undefined,
+          result: resultInput.trim() || undefined,
+          next_plan: nextPlanInput.trim() || undefined,
+          remarks: remarksInput.trim() || undefined,
+        };
+
+        if (targetId) {
+          savePayload.id = targetId;
+        }
+
+        const { data, error } = await supabase
+          .from('tasks')
+          .upsert(savePayload)
+          .select();
+
+        if (error) throw error;
       }
-
-      const savePayload: Task = {
-        title: titleInput.trim(),
-        content: contentInput.trim(),
-        assigned_to: userProfile.user_id,
-        status: statusInput,
-        task_date: taskDateInput,
-        start_time: startTimeInput ? `${startTimeInput}:00` : undefined,
-        end_time: endTimeInput ? `${endTimeInput}:00` : undefined,
-        result: resultInput.trim() || undefined,
-        next_plan: nextPlanInput.trim() || undefined,
-        remarks: remarksInput.trim() || undefined,
-      };
-
-      if (targetId) {
-        savePayload.id = targetId;
-      }
-
-      const { data, error } = await supabase
-        .from('tasks')
-        .upsert(savePayload)
-        .select();
-
-      if (error) throw error;
 
       alert(`[통합 저장 성공]\n${taskDateInput} 업무 및 보고서 내용이 정상 보관 및 갱신되었습니다.`);
       fetchMyData(); // 갱신 리로드
@@ -165,95 +215,122 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
 
   // 3. 구글 스프레드시트 양식 파일로 실질적 다운로드 (.xlsx)
   const handleDownloadExcel = () => {
-    // 구글 스프레드시트 템플릿 완벽 맵핑 2차원 배열 조립 (AOA)
-    const reportAOA = [
-      // 1행: 대타이틀 (A1~F1 병합)
+    const todayStr = taskDateInput || '미지정';
+    // Base sections
+    const headerRows = [
       ['일 일 업 무 보 고 서', '', '', '', '', ''],
-      
-      // 2~3행: 결재자 도장 우측 구역 (A2~B2, A3~B3 은 비우고 C2/C3 세로병합 '결재', D2/D3 작성, E2/E3 검토, F2/F3 승인)
-      ['', '', '결 재', '작 성', '검 토', '승 인'],
-      ['', '', '', userProfile.name, '인', '인'],
-      [], // 공백 라인
-      
-      // 5행 ~ 7행: 일반 사항
+      [],
       ['▣ 일반사항', '', '', '', '', ''],
       ['과제명', titleInput || '배정 과제명 없음', '', '구분', '인턴', ''],
-      ['날짜', taskDateInput || '미지정', '', '작성자', userProfile.name, ''],
-      [], // 공백 라인
-      
-      // 9행 ~ 11행: 금일 추진 내용
+      ['날짜', todayStr, '', '작성자', userProfile.name, ''],
+      [],
       ['▣ 금일 추진 내용', '', '', '', '', ''],
       ['구분', '과업 내용 (관리자 부여)', '', '처리 내용', '', '처리 상태'],
-      [todayLabel.replace(' 금일 업무 실시', ''), contentInput || '지정된 과업 없음', '', resultInput || '처리 내용 미작성', '', statusInput || '대기중'],
-      [], // 공백 라인
+    ];
+
+    // Dynamic "금일 추진 내용" rows
+    const todayRows: any[] = [];
+    reportTasks.forEach((rt) => {
+      const timeStr = (rt.start_time && rt.end_time)
+        ? `${rt.start_time.slice(0, 5)} ~ ${rt.end_time.slice(0, 5)}`
+        : '금일';
+      const labelText = `${todayStr} (${timeStr})`;
       
-      // 13행 ~ 15행: 명일 추진 계획
+      todayRows.push([
+        labelText,
+        rt.title ? `[${rt.title}] ` + (rt.content || '') : (rt.content || '지정된 과업 없음'),
+        '',
+        rt.result || '수행 결과 미작성',
+        '',
+        rt.status || '대기중'
+      ]);
+    });
+
+    if (todayRows.length === 0) {
+      todayRows.push([`${todayStr} (금일)`, '지정된 과업 없음', '', '처리 내용 미작성', '', '대기중']);
+    }
+
+    // Now adding "▣ 명일 추진 계획" section
+    const middleRows = [
+      [],
       ['▣ 명일 추진 계획', '', '', '', '', ''],
       ['구분', '추진 내용', '', '', '시간', ''],
-      [tomorrowLabel.replace(' 계획 예정 사항', ''), nextPlanInput || '진행계획 미작성', '', '', `${startTimeInput || '09:00'} ~ ${endTimeInput || '18:00'}`, ''],
-      [], // 공백 라인
-      
-      // 17행 ~ 18행: 기타 특이사항
+      [
+        '명일',
+        nextPlanInput || '진행계획 미작성',
+        '',
+        '',
+        `${startTimeInput || '09:00'} ~ ${endTimeInput || '18:00'}`,
+        ''
+      ],
+      [],
       ['▣ 기타 특이사항', '', '', '', '', ''],
       [remarksInput || '특이 및 건의사항이 없습니다.', '', '', '', '', '']
+    ];
+
+    // Combine them all
+    const reportAOA = [
+      ...headerRows,
+      ...todayRows,
+      ...middleRows
     ];
 
     const worksheet = XLSX.utils.aoa_to_sheet(reportAOA);
 
     // 구글 스프레드시트 같은 이쁜 너비 지정 (6열 기준 정교한 칼럼 너비 튜닝)
     worksheet['!cols'] = [
-      { wch: 15 }, // A: 구분 (날짜/오늘업무/내일업무 등)
+      { wch: 30 }, // A: 구분 (날짜(시간) 포맷 확장에 맞춰 열 너비 증가)
       { wch: 25 }, // B: 본문 1
       { wch: 25 }, // C: 본문 1 연장선
       { wch: 25 }, // D: 본문 2
       { wch: 20 }, // E: 본문 2 연장선 / 시간
-      { wch: 15 }  // F: 상태 / 시간 연장선 / 결재란 우측끝
+      { wch: 15 }  // F: 상태
     ];
 
     // 병합 처리 (Cell Merges)
-    worksheet['!merges'] = [
+    const mergesByRows = [
       // 대타이틀 세션 (A1~F1 병합)
       { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
       
-      // 결재판 세로 병합 (C2~C3: '결재')
-      { s: { r: 1, c: 2 }, e: { r: 2, c: 2 } },
-      
-      // 일반사항 소제목 병합 (A5~F5)
-      { s: { r: 4, c: 0 }, e: { r: 4, c: 5 } },
+      // 일반사항 소제목 병합 (A3~F3)
+      { s: { r: 2, c: 0 }, e: { r: 2, c: 5 } },
       
       // 일반사항 본문 병합
-      // 과제명 값 병합 (B6~C6)
-      { s: { r: 5, c: 1 }, e: { r: 5, c: 2 } },
-      // 구분 값 병합 (E6~F6)
-      { s: { r: 5, c: 4 }, e: { r: 5, c: 5 } },
-      // 날짜 값 병합 (B7~C7)
-      { s: { r: 6, c: 1 }, e: { r: 6, c: 2 } },
-      // 작성자 값 병합 (E7~F7)
-      { s: { r: 6, c: 4 }, e: { r: 6, c: 5 } },
+      // 과제명 값 병합 (B4~C4)
+      { s: { r: 3, c: 1 }, e: { r: 3, c: 2 } },
+      // 구분 값 병합 (E4~F4)
+      { s: { r: 3, c: 4 }, e: { r: 3, c: 5 } },
+      // 날짜 값 병합 (B5~C5)
+      { s: { r: 4, c: 1 }, e: { r: 4, c: 2 } },
+      // 작성자 값 병합 (E5~F5)
+      { s: { r: 4, c: 4 }, e: { r: 4, c: 5 } },
       
-      // 금일 추진 내용 소제목 병합 (A9~F9)
-      { s: { r: 8, c: 0 }, e: { r: 8, c: 5 } },
+      // 금일 추진 내용 소제목 병합 (A7~F7)
+      { s: { r: 6, c: 0 }, e: { r: 6, c: 5 } },
       // 금일 추진 내용 헤더 병합
-      { s: { r: 9, c: 1 }, e: { r: 9, c: 2 } }, // 과업내용 헤더 (B10~C10)
-      { s: { r: 9, c: 3 }, e: { r: 9, c: 4 } }, // 처리내용 헤더 (D10~E10)
-      // 금일 추진 내용 데이터 병합
-      { s: { r: 10, c: 1 }, e: { r: 10, c: 2 } }, // 과업내용 값 (B11~C11)
-      { s: { r: 10, c: 3 }, e: { r: 10, c: 4 } }, // 처리내용 값 (D11~E11)
-      
-      // 명일 추진 계획 소제목 병합 (A13~F13)
-      { s: { r: 12, c: 0 }, e: { r: 12, c: 5 } },
-      // 명일 추진 계획 헤더 병합
-      { s: { r: 13, c: 1 }, e: { r: 13, c: 3 } }, // 추진내용 헤더 (B14~D14)
-      { s: { r: 13, c: 4 }, e: { r: 13, c: 5 } }, // 시간 헤더 (E14~F14)
-      // 명일 추진 계획 데이터 병합
-      { s: { r: 14, c: 1 }, e: { r: 14, c: 3 } }, // 추진내용 값 (B15~D15)
-      { s: { r: 14, c: 4 }, e: { r: 14, c: 5 } }, // 시간 값 (E15~F15)
-      
-      // 기타 특이사항 소제목 병합 (A17~F17)
-      { s: { r: 16, c: 0 }, e: { r: 16, c: 5 } },
-      // 기타 특이사항 데이터 병합 (A18~F18)
-      { s: { r: 17, c: 0 }, e: { r: 17, c: 5 } }
+      { s: { r: 7, c: 1 }, e: { r: 7, c: 2 } }, // 과업내용 헤더 (B8~C8)
+      { s: { r: 7, c: 3 }, e: { r: 7, c: 4 } }, // 처리내용 헤더 (D8~E8)
     ];
+
+    // Dynamic merges for each todayRow
+    todayRows.forEach((row, i) => {
+      const r = 8 + i;
+      mergesByRows.push({ s: { r, c: 1 }, e: { r, c: 2 } }); // B to C merge
+      mergesByRows.push({ s: { r, c: 3 }, e: { r, c: 4 } }); // D to E merge
+    });
+
+    const nextOffset = 8 + todayRows.length;
+    mergesByRows.push(
+      { s: { r: nextOffset + 1, c: 0 }, e: { r: nextOffset + 1, c: 5 } }, // 명일 추진 계획 소제목
+      { s: { r: nextOffset + 2, c: 1 }, e: { r: nextOffset + 2, c: 3 } }, // 명일 헤더 추진내용
+      { s: { r: nextOffset + 2, c: 4 }, e: { r: nextOffset + 2, c: 5 } }, // 명일 헤더 시간
+      { s: { r: nextOffset + 3, c: 1 }, e: { r: nextOffset + 3, c: 3 } }, // 명일 값 추진내용
+      { s: { r: nextOffset + 3, c: 4 }, e: { r: nextOffset + 3, c: 5 } }, // 명일 값 시간
+      { s: { r: nextOffset + 5, c: 0 }, e: { r: nextOffset + 5, c: 5 } }, // 기타 특이사항 소제목
+      { s: { r: nextOffset + 6, c: 0 }, e: { r: nextOffset + 6, c: 5 } }  // 기타 특이사항 내용
+    );
+
+    worksheet['!merges'] = mergesByRows;
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, '일일업무보고서');
@@ -280,6 +357,9 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
       extendedProps: { ...t }
     };
   });
+
+  // 날짜 중복 제거 및 내림차순 정렬
+  const uniqueTaskDates = Array.from(new Set(myTasks.map(t => t.task_date).filter(Boolean))) as string[];
 
   // 오늘 날짜 및 요일 계산
   const todayVal = new Date(taskDateInput || new Date());
@@ -636,10 +716,10 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
                       }}
                       className="px-2.5 py-1 bg-white border border-[#141414] text-[#141414] font-bold rounded-none outline-none cursor-pointer"
                     >
-                      {myTasks.map(t => (
-                        <option key={t.id} value={t.task_date}>{t.task_date}</option>
+                      {uniqueTaskDates.map(dateStr => (
+                        <option key={dateStr} value={dateStr}>{dateStr}</option>
                       ))}
-                      {!myTasks.some(t => t.task_date === new Date().toISOString().split('T')[0]) && (
+                      {!uniqueTaskDates.includes(new Date().toISOString().split('T')[0]) && (
                         <option value={new Date().toISOString().split('T')[0]}>오늘 ({new Date().toISOString().split('T')[0]}) [새로 추가]</option>
                       )}
                     </select>
@@ -667,24 +747,6 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
                       <h2 className="text-xl font-bold tracking-[0.5em] text-[#141414] border-b-2 border-[#141414] pb-2 inline-block px-12 uppercase font-serif italic">
                         일일 업무 보고서
                       </h2>
-                      
-                      {/* 우측 결재 도장판 모사 */}
-                      <table className="absolute top-0 right-0 border-collapse text-[10px] w-48 text-center text-[#141414] font-bold border border-[#141414]">
-                        <tbody>
-                          <tr className="bg-[#F2F1EF]">
-                            <td className="border border-[#141414] py-0.5 w-1/3 text-[9px]">작성</td>
-                            <td className="border border-[#141414] py-0.5 w-1/3 text-[9px]">검토</td>
-                            <td className="border border-[#141414] py-0.5 w-1/3 text-[9px]">승인</td>
-                          </tr>
-                          <tr className="h-10 bg-white">
-                            <td className="border border-[#141414] align-middle py-1 text-[#141414] font-mono text-[9px]">
-                              {userProfile.name}<br/>(인턴)
-                            </td>
-                            <td className="border border-[#141414] text-gray-300 align-middle">인</td>
-                            <td className="border border-[#141414] text-gray-300 align-middle">인</td>
-                          </tr>
-                        </tbody>
-                      </table>
                     </div>
 
                     {/* 1. 기본 사항 테이블 */}
@@ -733,41 +795,54 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
                         </tr>
                       </thead>
                       <tbody>
-                        <tr>
-                          <td className="border border-[#141414] px-3 py-4 text-center font-bold text-[#141414] bg-[#F2F1EF]/30 whitespace-pre-wrap leading-relaxed text-[11px] font-mono">
-                            {todayLabel}
-                          </td>
-                          <td className="border border-[#141414] px-4 py-4 text-gray-600 leading-relaxed font-sans whitespace-pre-line vertical-align-top text-[11px]">
-                            {contentInput ? (
-                              contentInput.split('\n').map((line, i) => (
-                                <div key={i} className="mb-0.5">{line}</div>
-                              ))
-                            ) : (
-                              <span className="text-slate-400 italic">No instructions dispatched.</span>
-                            )}
-                          </td>
-                          <td className="border border-[#141414] p-2 bg-amber-50/10">
-                            <textarea
-                              rows={3}
-                              required
-                              placeholder="오늘 수행한 상세 결과를 자유롭게 작성해 주세요..."
-                              value={resultInput}
-                              onChange={(e) => setResultInput(e.currentTarget.value)}
-                              className="w-full h-full p-2 bg-transparent text-[#141414] border border-[#141414]/20 hover:border-[#141414] focus:border-[#141414] rounded-none outline-none leading-relaxed font-mono text-[11px]"
-                            />
-                          </td>
-                          <td className="border border-[#141414] p-3 text-center">
-                            <select
-                              value={statusInput}
-                              onChange={(e: any) => setStatusInput(e.currentTarget.value)}
-                              className="px-2 py-1 text-xs border border-[#141414] rounded-none outline-none bg-white text-[#141414] font-bold cursor-pointer font-mono text-[11px]"
-                            >
-                              <option value="대기중">대기중 [PEND]</option>
-                              <option value="처리중">처리중 [PROC]</option>
-                              <option value="완료">완료 [COMP]</option>
-                            </select>
-                          </td>
-                        </tr>
+                        {reportTasks.map((rt, idx) => (
+                          <tr key={rt.id || idx}>
+                            <td className="border border-[#141414] px-3 py-4 text-center font-bold text-[#141414] bg-[#F2F1EF]/30 whitespace-pre-wrap leading-relaxed text-[11px] font-mono">
+                              {taskDateInput} ({rt.start_time && rt.end_time 
+                                ? `${rt.start_time.slice(0, 5)} ~ ${rt.end_time.slice(0, 5)}`
+                                : '금일'})
+                            </td>
+                            <td className="border border-[#141414] px-4 py-4 text-gray-600 leading-relaxed font-sans whitespace-pre-line vertical-align-top text-[11px]">
+                              {rt.title && <div className="font-bold text-[#141414] mb-1">{rt.title}</div>}
+                              {rt.content ? (
+                                rt.content.split('\n').map((line, i) => (
+                                  <div key={i} className="mb-0.5">{line}</div>
+                                ))
+                              ) : (
+                                <span className="text-slate-400 italic">No instructions dispatched.</span>
+                              )}
+                            </td>
+                            <td className="border border-[#141414] p-2 bg-amber-50/10">
+                              <textarea
+                                rows={3}
+                                required
+                                placeholder="오늘 수행한 상세 결과를 자유롭게 작성해 주세요..."
+                                value={rt.result || ''}
+                                onChange={(e) => {
+                                  const updated = [...reportTasks];
+                                  updated[idx] = { ...rt, result: e.currentTarget.value };
+                                  setReportTasks(updated);
+                                }}
+                                className="w-full h-full p-2 bg-transparent text-[#141414] border border-[#141414]/20 hover:border-[#141414] focus:border-[#141414] rounded-none outline-none leading-relaxed font-mono text-[11px]"
+                              />
+                            </td>
+                            <td className="border border-[#141414] p-3 text-center">
+                              <select
+                                value={rt.status || '대기중'}
+                                onChange={(e: any) => {
+                                  const updated = [...reportTasks];
+                                  updated[idx] = { ...rt, status: e.currentTarget.value };
+                                  setReportTasks(updated);
+                                }}
+                                className="px-2 py-1 text-xs border border-[#141414] rounded-none outline-none bg-white text-[#141414] font-bold cursor-pointer font-mono text-[11px]"
+                              >
+                                <option value="대기중">대기중 [PEND]</option>
+                                <option value="처리중">처리중 [PROC]</option>
+                                <option value="완료">완료 [COMP]</option>
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
 
