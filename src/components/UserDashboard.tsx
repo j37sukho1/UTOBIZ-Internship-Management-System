@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { UserProfile, Task } from '../types';
 import FullCalendar from '@fullcalendar/react';
@@ -21,6 +21,15 @@ interface UserDashboardProps {
 export default function UserDashboard({ userProfile, onLogout }: UserDashboardProps) {
   const [activeTab, setActiveTab] = useState<'home' | 'plan' | 'report'>('home');
   const [loading, setLoading] = useState(false);
+
+  // 로컬 컴퓨터 날짜 기준으로 YYYY-MM-DD 스트링 취득
+  const getTodayLocalString = () => {
+    const todayLocal = new Date();
+    const y = todayLocal.getFullYear();
+    const m = String(todayLocal.getMonth() + 1).padStart(2, '0');
+    const d = String(todayLocal.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
   
   // 나의 모든 과업 및 일정 리스트
   const [myTasks, setMyTasks] = useState<Task[]>([]);
@@ -32,7 +41,7 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
   const [titleInput, setTitleInput] = useState('');
   const [contentInput, setContentInput] = useState('');
   const [statusInput, setStatusInput] = useState<'대기중' | '처리중' | '완료'>('대기중');
-  const [taskDateInput, setTaskDateInput] = useState('');
+  const [taskDateInput, setTaskDateInput] = useState(getTodayLocalString());
   const [startTimeInput, setStartTimeInput] = useState('09:00');
   const [endTimeInput, setEndTimeInput] = useState('18:00');
   const [resultInput, setResultInput] = useState('');
@@ -41,8 +50,9 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
 
   // 일일 업무보고 다중 작업 상태 관리 (동일 날짜 여러 과업의 결과 및 상태 취합용)
   const [reportTasks, setReportTasks] = useState<Task[]>([]);
+  const [tomorrowReportTasks, setTomorrowReportTasks] = useState<Task[]>([]);
 
-  // Load/synchronize reportTasks for the combined report on report view
+  // Load/synchronize reportTasks and tomorrowReportTasks for the combined report on report view
   useEffect(() => {
     if (taskDateInput) {
       const filtered = myTasks.filter(t => t.task_date === taskDateInput);
@@ -61,8 +71,30 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
           remarks: ''
         }]);
       }
+
+      // 내일(tomorrow) 날짜 구하고 그 날짜에 매핑된 과업들 찾기
+      const parts = taskDateInput.split('-');
+      if (parts.length === 3) {
+        const y = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10) - 1;
+        const d = parseInt(parts[2], 10);
+        const todayObj = new Date(y, m, d);
+        const tomorrowObj = new Date(y, m, d);
+        tomorrowObj.setDate(todayObj.getDate() + 1);
+        
+        const tomY = tomorrowObj.getFullYear();
+        const tomM = String(tomorrowObj.getMonth() + 1).padStart(2, '0');
+        const tomD = String(tomorrowObj.getDate()).padStart(2, '0');
+        const tomStr = `${tomY}-${tomM}-${tomD}`;
+
+        const tomorrowFiltered = myTasks.filter(t => t.task_date === tomStr);
+        setTomorrowReportTasks(tomorrowFiltered.map(t => ({ ...t })));
+      } else {
+        setTomorrowReportTasks([]);
+      }
     } else {
       setReportTasks([]);
+      setTomorrowReportTasks([]);
     }
   }, [taskDateInput, myTasks]);
 
@@ -79,14 +111,17 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
       if (error) throw error;
       setMyTasks(data || []);
 
-      // 룰: 로그인 완료와 동시에, 해당 유저 세션의 가장 최신 날짜 데이터를 DB에서 자동으로 불러와 화면에 초기 로드(Read)한다.
-      if (data && data.length > 0) {
-        // 이미 정렬되어 있으므로 첫 번째 항목이 단연 최신 데이터(상위 1개)
-        const latest = data[0];
-        loadTaskToForm(latest);
+      const todayStr = getTodayLocalString();
+
+      // 오늘 날짜에 해당하는 첫 번째 과업을 찾아서 디폴트로 노출
+      const todayTask = data?.find(t => t.task_date === todayStr);
+
+      if (todayTask) {
+        loadTaskToForm(todayTask);
       } else {
-        // 아예 비어있을 경우 오늘 날짜 기준으로 초기화 시도
+        // 오늘 날짜 과제가 아예 없을 경우에는 첫 페이지 로드 시 "오늘"의 빈 폼을 디폴트로 활성화한다
         initBlankForm();
+        setTaskDateInput(todayStr);
       }
     } catch (err: any) {
       alert('나의 일정을 가져오는 중 에러가 발생했습니다: ' + err.message);
@@ -123,7 +158,7 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
     setTitleInput(lastProjectName);
     setContentInput(lastProjectContent);
     setStatusInput('대기중');
-    setTaskDateInput(new Date().toISOString().split('T')[0]);
+    setTaskDateInput(getTodayLocalString());
     setStartTimeInput('09:00');
     setEndTimeInput('18:00');
     setResultInput('');
@@ -148,18 +183,31 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
             ...t,
             task_date: taskDateInput,
             assigned_to: userProfile.user_id,
-            next_plan: nextPlanInput.trim() || undefined,
             remarks: remarksInput.trim() || undefined,
           };
+          // 만약 내일 부여된 과제가 없을 경우에만 general 계획(nextPlanInput)을 오늘 과제 레코드에 백업
+          if (tomorrowReportTasks.length === 0) {
+            item.next_plan = nextPlanInput.trim() || undefined;
+          }
           return item;
         });
 
-        const { data, error } = await supabase
+        const { error } = await supabase
           .from('tasks')
-          .upsert(payLoads)
-          .select();
+          .upsert(payLoads);
 
         if (error) throw error;
+
+        // 명일 자율/개별 과업 추진 계획 저장
+        if (tomorrowReportTasks.length > 0) {
+          const { error: errorTom } = await supabase
+            .from('tasks')
+            .upsert(tomorrowReportTasks.map(t => ({
+              ...t,
+              assigned_to: userProfile.user_id
+            })));
+          if (errorTom) throw errorTom;
+        }
       } else {
         if (!titleInput.trim()) {
           alert('프로젝트(과제)명을 입력해 주세요.');
@@ -251,22 +299,41 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
     }
 
     // Now adding "▣ 명일 추진 계획" section
-    const middleRows = [
+    const middleRows: any[][] = [
       [],
       ['▣ 명일 추진 계획', '', '', '', '', ''],
-      ['구분', '추진 내용', '', '', '시간', ''],
-      [
-        '명일',
+      ['구분', '과업 내용(관리자 부여)', '', '추진 내용', '', '']
+    ];
+
+    if (tomorrowReportTasks.length > 0) {
+      tomorrowReportTasks.forEach(t => {
+        const detail = t.content ? ` - ${t.content}` : '';
+        const titleStr = t.title ? `[${t.title}]${detail}` : t.content || '';
+        middleRows.push([
+          tomorrowLabel || '명일',
+          titleStr,
+          '',
+          t.next_plan || '진행계획 미작성',
+          '',
+          ''
+        ]);
+      });
+    } else {
+      middleRows.push([
+        tomorrowLabel || '명일',
+        '부여된 과업 없음 (자율 추진 계획)',
+        '',
         nextPlanInput || '진행계획 미작성',
         '',
-        '',
-        `${startTimeInput || '09:00'} ~ ${endTimeInput || '18:00'}`,
         ''
-      ],
+      ]);
+    }
+
+    middleRows.push(
       [],
       ['▣ 기타 특이사항', '', '', '', '', ''],
       [remarksInput || '특이 및 건의사항이 없습니다.', '', '', '', '', '']
-    ];
+    );
 
     // Combine them all
     const reportAOA = [
@@ -322,12 +389,23 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
     const nextOffset = 8 + todayRows.length;
     mergesByRows.push(
       { s: { r: nextOffset + 1, c: 0 }, e: { r: nextOffset + 1, c: 5 } }, // 명일 추진 계획 소제목
-      { s: { r: nextOffset + 2, c: 1 }, e: { r: nextOffset + 2, c: 3 } }, // 명일 헤더 추진내용
-      { s: { r: nextOffset + 2, c: 4 }, e: { r: nextOffset + 2, c: 5 } }, // 명일 헤더 시간
-      { s: { r: nextOffset + 3, c: 1 }, e: { r: nextOffset + 3, c: 3 } }, // 명일 값 추진내용
-      { s: { r: nextOffset + 3, c: 4 }, e: { r: nextOffset + 3, c: 5 } }, // 명일 값 시간
-      { s: { r: nextOffset + 5, c: 0 }, e: { r: nextOffset + 5, c: 5 } }, // 기타 특이사항 소제목
-      { s: { r: nextOffset + 6, c: 0 }, e: { r: nextOffset + 6, c: 5 } }  // 기타 특이사항 내용
+      { s: { r: nextOffset + 2, c: 1 }, e: { r: nextOffset + 2, c: 2 } }, // 명일 헤더 과업내용 (B to C)
+      { s: { r: nextOffset + 2, c: 3 }, e: { r: nextOffset + 2, c: 5 } }  // 명일 헤더 추진계획내용 (D to F)
+    );
+
+    const tomorrowRowsCount = tomorrowReportTasks.length > 0 ? tomorrowReportTasks.length : 1;
+    for (let j = 0; j < tomorrowRowsCount; j++) {
+      const r = nextOffset + 3 + j;
+      mergesByRows.push(
+        { s: { r, c: 1 }, e: { r, c: 2 } }, // 과업내용 B to C
+        { s: { r, c: 3 }, e: { r, c: 5 } }  // 추진계획내용 D to F
+      );
+    }
+
+    const remarksOffset = nextOffset + 3 + tomorrowRowsCount;
+    mergesByRows.push(
+      { s: { r: remarksOffset + 1, c: 0 }, e: { r: remarksOffset + 1, c: 5 } }, // 기타 특이사항 소제목
+      { s: { r: remarksOffset + 2, c: 0 }, e: { r: remarksOffset + 2, c: 5 } }  // 기타 특이사항 내용
     );
 
     worksheet['!merges'] = mergesByRows;
@@ -358,22 +436,55 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
     };
   });
 
-  // 날짜 중복 제거 및 내림차순 정렬
-  const uniqueTaskDates = Array.from(new Set(myTasks.map(t => t.task_date).filter(Boolean))) as string[];
+  // 날짜 중복 제거 및 내림차순 정렬하되, 오늘 날짜가 존재한다면 목록 최상단에 배치
+  const uniqueTaskDates = useMemo(() => {
+    const rawDates = Array.from(new Set(myTasks.map(t => t.task_date).filter(Boolean))) as string[];
+    // 날짜 역순(최신순) 정렬
+    rawDates.sort((a, b) => b.localeCompare(a));
+    const todayStr = getTodayLocalString();
+    if (rawDates.includes(todayStr)) {
+      const filtered = rawDates.filter(d => d !== todayStr);
+      return [todayStr, ...filtered];
+    }
+    return rawDates;
+  }, [myTasks]);
 
-  // 오늘 날짜 및 요일 계산
-  const todayVal = new Date(taskDateInput || new Date());
-  const tomorrowVal = new Date(todayVal);
-  tomorrowVal.setDate(todayVal.getDate() + 1);
+  // 오늘 및 내일 날짜와 요일의 안전한 계산 (시차/타임존 왜곡 방지)
   const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
-  
+
+  const getSafeTodayAndTomorrow = (inputDate: string) => {
+    const rawDate = inputDate || getTodayLocalString();
+    const parts = rawDate.split('-');
+    if (parts.length === 3) {
+      const y = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10) - 1;
+      const d = parseInt(parts[2], 10);
+      const today = new Date(y, m, d);
+      const tomorrow = new Date(y, m, d);
+      tomorrow.setDate(today.getDate() + 1);
+      return { today, tomorrow };
+    }
+    const today = new Date();
+    const tomorrow = new Date();
+    tomorrow.setDate(today.getDate() + 1);
+    return { today, tomorrow };
+  };
+
+  const { today: safeToday, tomorrow: safeTomorrow } = getSafeTodayAndTomorrow(taskDateInput);
+
   const todayLabel = taskDateInput 
-    ? `${taskDateInput} (${weekdays[todayVal.getDay()]}요일) 금일 업무 실시`
+    ? `${taskDateInput} (${weekdays[safeToday.getDay()]}요일) 금일 업무 실시`
     : '오늘의 업무 실시 내역';
 
+  const tomorrowDateStr = taskDateInput
+    ? `${safeTomorrow.getFullYear()}-${String(safeTomorrow.getMonth() + 1).padStart(2, '0')}-${String(safeTomorrow.getDate()).padStart(2, '0')}`
+    : '';
+
   const tomorrowLabel = taskDateInput
-    ? `${tomorrowVal.getFullYear()}-${String(tomorrowVal.getMonth() + 1).padStart(2, '0')}-${String(tomorrowVal.getDate()).padStart(2, '0')} (${weekdays[tomorrowVal.getDay()]}요일) 계획 예정 사항`
+    ? `${tomorrowDateStr} (${weekdays[safeTomorrow.getDay()]}요일) 계획 예정 사항`
     : '명일의 업무 예정 사항';
+
+  const tomorrowTasks = myTasks.filter(t => t.task_date === tomorrowDateStr);
 
   return (
     <div className="min-h-screen bg-[#E4E3E0] flex flex-col font-sans text-[#141414] select-none">
@@ -447,7 +558,17 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
               <span className="text-[10px] font-mono font-bold">[02]</span>
             </button>
             <button
-              onClick={() => setActiveTab('report')}
+              onClick={() => {
+                setActiveTab('report');
+                const todayStr = getTodayLocalString();
+                const matchedToday = myTasks.find(t => t.task_date === todayStr);
+                if (matchedToday) {
+                  loadTaskToForm(matchedToday);
+                } else {
+                  initBlankForm();
+                  setTaskDateInput(todayStr);
+                }
+              }}
               className={`w-full text-left p-2.5 flex items-center justify-between transition-colors rounded-none ${
                 activeTab === 'report' 
                   ? 'bg-[#F7941D] text-white font-bold' 
@@ -716,12 +837,12 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
                       }}
                       className="px-2.5 py-1 bg-white border border-[#141414] text-[#141414] font-bold rounded-none outline-none cursor-pointer"
                     >
+                      {!uniqueTaskDates.includes(getTodayLocalString()) && (
+                        <option value={getTodayLocalString()}>오늘 ({getTodayLocalString()}) [새로 추가]</option>
+                      )}
                       {uniqueTaskDates.map(dateStr => (
                         <option key={dateStr} value={dateStr}>{dateStr}</option>
                       ))}
-                      {!uniqueTaskDates.includes(new Date().toISOString().split('T')[0]) && (
-                        <option value={new Date().toISOString().split('T')[0]}>오늘 ({new Date().toISOString().split('T')[0]}) [새로 추가]</option>
-                      )}
                     </select>
                   </div>
                   
@@ -850,46 +971,65 @@ export default function UserDashboard({ userProfile, onLogout }: UserDashboardPr
                     <div className="bg-[#F2F1EF] text-xs font-sans font-bold px-3 py-1 border border-[#141414] mb-1 border-b-0 uppercase">
                       명일 추진 계획
                     </div>
-                    <table className="w-full text-xs border-collapse border border-[#141414] mb-1">
+                    <table className="w-full text-xs border-collapse border border-[#141414] mb-4">
                       <thead>
                         <tr className="bg-[#F2F1EF] text-[#141414] text-[11px] font-sans">
-                          <th className="border border-[#141414] px-3 py-2 font-bold w-1/6 text-center">구분</th>
-                          <th className="border border-[#141414] px-4 py-2 font-bold w-4/6 text-left">추진 내용</th>
-                          <th className="border border-[#141414] px-3 py-2 font-bold w-1/6 text-center">시간</th>
+                          <th className="border border-[#141414] px-3 py-2 font-bold w-[16.66%] text-center">구분</th>
+                          <th className="border border-[#141414] px-4 py-2 font-bold w-[41.67%] text-left">과업 내용(관리자 부여)</th>
+                          <th className="border border-[#141414] px-4 py-2 font-bold w-[41.67%] text-left">추진 내용</th>
                         </tr>
                       </thead>
                       <tbody>
-                        <tr>
-                          <td className="border border-[#141414] px-3 py-4 text-center font-bold text-[#141414] bg-[#F2F1EF]/30 whitespace-pre-wrap leading-relaxed text-[11px] font-mono">
-                            {tomorrowLabel}
-                          </td>
-                          <td className="border border-[#141414] p-2 bg-slate-50/10">
-                            <textarea
-                              rows={2}
-                              placeholder="내일 진행할 구체적인 예정 및 로드맵 사항을 작성해 주세요..."
-                              value={nextPlanInput}
-                              onChange={(e) => setNextPlanInput(e.currentTarget.value)}
-                              className="w-full h-full p-2 bg-transparent text-[#141414] border border-[#141414]/20 focus:border-[#141414] rounded-none outline-none text-[11px] font-mono"
-                            />
-                          </td>
-                          <td className="border border-[#141414] px-3 py-4 text-center font-mono">
-                            <div className="flex flex-col items-center gap-1.5 justify-center">
-                              <input
-                                type="time"
-                                value={startTimeInput}
-                                onChange={(e) => setStartTimeInput(e.currentTarget.value)}
-                                className="px-1.5 py-0.5 border border-[#141414] rounded-none text-[10px] outline-none font-mono"
+                        {tomorrowReportTasks.length > 0 ? (
+                          tomorrowReportTasks.map((t, idx) => (
+                            <tr key={t.id || idx}>
+                              <td className="border border-[#141414] px-3 py-4 text-center font-bold text-[#141414] bg-[#F2F1EF]/30 whitespace-pre-wrap leading-relaxed text-[11px] font-mono">
+                                {tomorrowLabel}
+                              </td>
+                              <td className="border border-[#141414] px-4 py-4 text-gray-600 leading-relaxed font-sans whitespace-pre-line vertical-align-top text-[11px]">
+                                {t.title && <div className="font-bold text-[#141414] mb-1">{t.title}</div>}
+                                {t.content ? (
+                                  t.content.split('\n').map((line, i) => (
+                                    <div key={i} className="mb-0.5">{line}</div>
+                                  ))
+                                ) : (
+                                  <span className="text-slate-400 italic">세부 사항 없음</span>
+                                )}
+                              </td>
+                              <td className="border border-[#141414] p-2 bg-slate-50/10">
+                                <textarea
+                                  rows={3}
+                                  placeholder="배정된 과업에 근거하여 명일 추진할 구체적인 계획을 작성해 주세요..."
+                                  value={t.next_plan || ''}
+                                  onChange={(e) => {
+                                    const updated = [...tomorrowReportTasks];
+                                    updated[idx] = { ...t, next_plan: e.currentTarget.value };
+                                    setTomorrowReportTasks(updated);
+                                  }}
+                                  className="w-full h-full p-2 bg-transparent text-[#141414] border border-[#141414]/20 hover:border-[#141414] focus:border-[#141414] rounded-none outline-none leading-relaxed font-mono text-[11px]"
+                                />
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td className="border border-[#141414] px-3 py-4 text-center font-bold text-[#141414] bg-[#F2F1EF]/30 whitespace-pre-wrap leading-relaxed text-[11px] font-mono">
+                              {tomorrowLabel}
+                            </td>
+                            <td className="border border-[#141414] px-4 py-4 text-gray-400 italic leading-relaxed text-[11px] bg-slate-50/5">
+                              부여된 과업 없음 (자율 추진 계획)
+                            </td>
+                            <td className="border border-[#141414] p-2 bg-slate-50/10">
+                              <textarea
+                                rows={3}
+                                placeholder="명일 진행할 자율 추진 계획을 자유롭게 작성해 주세요..."
+                                value={nextPlanInput}
+                                onChange={(e) => setNextPlanInput(e.currentTarget.value)}
+                                className="w-full h-full p-2 bg-transparent text-[#141414] border border-[#141414]/20 hover:border-[#141414] focus:border-[#141414] rounded-none outline-none text-[11px] font-mono"
                               />
-                              <span className="text-gray-400 text-[10px]">-</span>
-                              <input
-                                type="time"
-                                value={endTimeInput}
-                                onChange={(e) => setEndTimeInput(e.currentTarget.value)}
-                                className="px-1.5 py-0.5 border border-[#141414] rounded-none text-[10px] outline-none font-mono"
-                              />
-                            </div>
-                          </td>
-                        </tr>
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
 

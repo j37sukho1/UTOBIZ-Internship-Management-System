@@ -98,6 +98,8 @@ export default function AdminDashboard({ userProfile, onLogout }: AdminDashboard
   const [assignTitle, setAssignTitle] = useState<string>('');
   const [assignContent, setAssignContent] = useState<string>('');
   const [assignDate, setAssignDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [isRangeMode, setIsRangeMode] = useState<boolean>(false);
+  const [assignEndDate, setAssignEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
 
   // 메뉴 2: 보고서 검토 필터
   const [selectedInternId, setSelectedInternId] = useState<string>('');
@@ -182,22 +184,43 @@ export default function AdminDashboard({ userProfile, onLogout }: AdminDashboard
       alert('과제일정(날짜)을 지정해주세요.');
       return;
     }
+    if (isRangeMode && !assignEndDate) {
+      alert('종료 날짜를 범위로 채워주세요.');
+      return;
+    }
+    if (isRangeMode && assignEndDate < assignDate) {
+      alert('종료 날짜는 시작 날짜보다 빠를 수 없습니다.');
+      return;
+    }
 
     setActionLoading(true);
+
+    const getDatesInRange = (startDate: string, endDate: string) => {
+      const datesList = [];
+      const current = new Date(startDate);
+      const last = new Date(endDate);
+      while (current <= last) {
+        datesList.push(current.toISOString().split('T')[0]);
+        current.setDate(current.getDate() + 1);
+      }
+      return datesList;
+    };
+
+    const datesToAssign = isRangeMode ? getDatesInRange(assignDate, assignEndDate) : [assignDate];
 
     if (isSandboxMode) {
       // 샌드박스 시뮬레이션: 메모리 상태에 즉시 과제 생성 추가
       setTimeout(() => {
-        const newTask: Task = {
-          id: `mock-task-uuid-${Date.now()}`,
+        const newTasks: Task[] = datesToAssign.map((d, index) => ({
+          id: `mock-task-uuid-${Date.now()}-${index}`,
           title: assignTitle.trim(),
           content: assignContent.trim(),
           assigned_to: assignTargetId,
-          task_date: assignDate,
+          task_date: d,
           status: '대기중'
-        };
-        setAllTasks(prev => [newTask, ...prev]);
-        alert('[샌드박스 작동] 로컬 메모리에 모의 과제가 성공적으로 부여되었습니다. (실제 DB에는 저장되지 않음)');
+        }));
+        setAllTasks(prev => [...newTasks, ...prev]);
+        alert(`[샌드박스 작동] 로컬 메모리에 총 ${newTasks.length}개의 과제가 성공적으로 부여되었습니다. (실제 DB에는 저장되지 않음)`);
         setAssignTitle('');
         setAssignContent('');
         setActionLoading(false);
@@ -206,17 +229,19 @@ export default function AdminDashboard({ userProfile, onLogout }: AdminDashboard
     }
 
     try {
-      const { error } = await supabase.from('tasks').insert({
+      const payloads = datesToAssign.map(d => ({
         title: assignTitle.trim(),
         content: assignContent.trim(),
         assigned_to: assignTargetId,
-        task_date: assignDate,
+        task_date: d,
         status: '대기중'
-      });
+      }));
+
+      const { error } = await supabase.from('tasks').insert(payloads);
 
       if (error) throw error;
 
-      alert('해당 인턴에게 새로운 과제가 성공적으로 부여되었습니다.');
+      alert(`해당 인턴에게 총 ${payloads.length}일의 신규 과제가 정상적으로 부여되었습니다.`);
       setAssignTitle('');
       setAssignContent('');
       fetchData(); // 데이터 새로고침
@@ -300,6 +325,63 @@ export default function AdminDashboard({ userProfile, onLogout }: AdminDashboard
     
     // 파일 쓰기 및 다운로드 트리거
     XLSX.writeFile(workbook, `[업무보고서_${internName}_전체내역].xlsx`);
+  };
+
+  // 메뉴 2-2: 전체 인원 통합 엑셀 파일 다운로드 (인턴명 필드를 추가하여 순서대로 결합)
+  const downloadAllReportsToExcel = () => {
+    if (allTasks.length === 0) {
+      alert('다운로드할 업무보고 데이터가 존재하지 않습니다.');
+      return;
+    }
+
+    // 인턴 이름 가나다순으로 정렬 후 날짜 순으로 정렬
+    const sortedTasks = [...allTasks].sort((a, b) => {
+      const internA = interns.find(i => i.user_id === a.assigned_to)?.name || '';
+      const internB = interns.find(i => i.user_id === b.assigned_to)?.name || '';
+      if (internA !== internB) {
+        return internA.localeCompare(internB, 'ko');
+      }
+      return (a.task_date || '').localeCompare(b.task_date || '');
+    });
+
+    const dataForExcel = sortedTasks.map((t, idx) => {
+      const matchedIntern = interns.find(i => i.user_id === t.assigned_to);
+      return {
+        'No': idx + 1,
+        '인턴명': matchedIntern?.name || '미확인 인턴',
+        '과제일정(날짜)': t.task_date,
+        '근무 시작시간': t.start_time || '지정 안 됨',
+        '근무 종료시간': t.end_time || '지정 안 됨',
+        '과제 및 프로젝트명': t.title,
+        '할당 과업 상세': t.content,
+        '과업 수행 결과(금일실시)': t.result || '미작성',
+        '차기 예정 사항(명일계획)': t.next_plan || '미작성',
+        '특이 및 건의사항(비고)': t.remarks || '없음',
+        '과업 상태': t.status
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(dataForExcel);
+
+    const wscols = [
+      { wch: 6 },  // No
+      { wch: 12 }, // 인턴명
+      { wch: 15 }, // 날짜
+      { wch: 14 }, // 시작시간
+      { wch: 14 }, // 종료시간
+      { wch: 20 }, // 과제명
+      { wch: 25 }, // 과업상세
+      { wch: 30 }, // 금일실시
+      { wch: 30 }, // 명일계획
+      { wch: 25 }, // 비고
+      { wch: 12 }  // 상태
+    ];
+    worksheet['!cols'] = wscols;
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, '전체인원_통합보고서');
+
+    XLSX.writeFile(workbook, '[업무보고서_전체인원_통합내역].xlsx');
   };
 
   // FullCalendar용 일정 매핑
@@ -744,15 +826,59 @@ ALTER TABLE public.tasks DISABLE ROW LEVEL SECURITY;`}
                   </div>
 
                   {/* 날짜 설정 */}
-                  <div>
-                    <label className="block text-[10px] font-mono uppercase tracking-wider text-gray-400 mb-1">Task Assigned Date</label>
-                    <input
-                      type="date"
-                      required
-                      value={assignDate}
-                      onChange={(e) => setAssignDate(e.currentTarget.value)}
-                      className="w-full px-3 py-1.5 bg-[#F2F1EF] border border-[#141414] font-mono focus:outline-none"
-                    />
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-[10px] font-mono uppercase tracking-wider text-gray-400">Task Date Configuration</label>
+                      <label className="flex items-center gap-1 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={isRangeMode}
+                          onChange={(e) => {
+                            setIsRangeMode(e.target.checked);
+                            if (e.target.checked) {
+                              setAssignEndDate(assignDate);
+                            }
+                          }}
+                          className="w-3 h-3 rounded-none accent-[#F7941D] cursor-pointer"
+                        />
+                        <span className="text-[10px] font-mono uppercase font-bold text-[#141414]">기간 설정 부여</span>
+                      </label>
+                    </div>
+
+                    {!isRangeMode ? (
+                      <div>
+                        <input
+                          type="date"
+                          required
+                          value={assignDate}
+                          onChange={(e) => setAssignDate(e.currentTarget.value)}
+                          className="w-full px-3 py-1.5 bg-[#F2F1EF] border border-[#141414] font-mono text-xs focus:outline-none"
+                        />
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="text-[9px] font-mono text-gray-400 block mb-0.5">시작일 (FROM)</span>
+                          <input
+                            type="date"
+                            required
+                            value={assignDate}
+                            onChange={(e) => setAssignDate(e.currentTarget.value)}
+                            className="w-full px-2 py-1.5 bg-[#F2F1EF] border border-[#141414] font-mono text-[11px] focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <span className="text-[9px] font-mono text-gray-400 block mb-0.5">종료일 (TO)</span>
+                          <input
+                            type="date"
+                            required
+                            value={assignEndDate}
+                            onChange={(e) => setAssignEndDate(e.currentTarget.value)}
+                            className="w-full px-2 py-1.5 bg-[#F2F1EF] border border-[#141414] font-mono text-[11px] focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* 과제 명 */}
@@ -824,15 +950,28 @@ ALTER TABLE public.tasks DISABLE ROW LEVEL SECURITY;`}
                   </select>
                 </div>
 
-                {selectedInternTasks.length > 0 && (
-                  <button
-                    onClick={downloadReportsToExcel}
-                    className="bg-[#F7941D] border border-[#141414] text-white hover:bg-white hover:text-[#F7941D] font-bold text-xs py-1.5 px-4 rounded-none flex items-center gap-1.5 transition-colors uppercase font-mono shadow-[3px_3px_0px_0px_rgba(20,20,20,0.15)]"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>EXPORT.XLSX</span>
-                  </button>
-                )}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {allTasks.length > 0 && (
+                    <button
+                      onClick={downloadAllReportsToExcel}
+                      className="bg-[#141414] border border-[#141414] text-white hover:bg-[#F7941D] hover:border-[#141414] font-bold text-xs py-1.5 px-4 rounded-none flex items-center gap-1.5 transition-colors uppercase font-mono shadow-[3px_3px_0px_0px_rgba(20,20,20,0.15)]"
+                      title="전체 인턴의 모든 업무 보고서를 하나의 엑셀 파일로 통합하여 연속해서 내려받습니다."
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>EXPORT_ALL_INTEGRATED.XLSX</span>
+                    </button>
+                  )}
+                  {selectedInternTasks.length > 0 && (
+                    <button
+                      onClick={downloadReportsToExcel}
+                      className="bg-[#F7941D] border border-[#141414] text-white hover:bg-white hover:text-[#F7941D] font-bold text-xs py-1.5 px-4 rounded-none flex items-center gap-1.5 transition-colors uppercase font-mono shadow-[3px_3px_0px_0px_rgba(20,20,20,0.15)]"
+                      title="선택한 인턴의 업무 보고서만 엑셀로 내려받습니다."
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>EXPORT_SINGLE.XLSX</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* 업무 보고 목록 */}
