@@ -1,0 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Playfair+Display:ital,wght@0,400..700;1,400..700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-serif: "Playfair Display", Georgia, serif;
+}
+
+/* Base custom styles to align with brutalist technical aesthetic */
+body {
+  background-color: #E4E3E0;
+  color: #141414;
+}
+
+/* Custom scrollbars for data grid look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F2F1EF;
+  border-left: 1px solid #141414;
+}
+::-webkit-scrollbar-thumb {
+  background: #141414;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a3a;
+}
+
+/* FullCalendar styling overrides for a retro grid vibe */
+.fc {
+  --fc-border-color: #141414 !important;
+  --fc-button-bg-color: #ffffff !important;
+  --fc-button-border-color: #141414 !important;
+  --fc-button-text-color: #141414 !important;
+  --fc-button-hover-bg-color: #F2F1EF !important;
+  --fc-button-active-bg-color: #141414 !important;
+  --fc-button-active-border-color: #141414 !important;
+  --fc-button-active-text-color: #ffffff !important;
+}
+
+.fc .fc-toolbar-title {
+  font-family: var(--font-serif) !important;
+  font-style: italic !important;
+  font-size: 1.25rem !important;
+  color: #141414 !important;
+}
+
+.fc .fc-col-header-cell {
+  background-color: #F2F1EF !important;
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  text-transform: uppercase !important;
+  color: #141414 !important;
+  padding: 6px 0 !important;
+  border: 1px solid #141414 !important;
+}
+
+.fc .fc-daygrid-day {
+  border: 1px solid #141414 !important;
+}
+
+.fc .fc-daygrid-day-number {
+  font-family: var(--font-mono) !important;
+  color: #141414 !important;
+  font-size: 11px !important;
+  font-weight: bold !important;
+  padding: 4px !important;
+}
+
+.fc-theme-standard td, .fc-theme-standard th {
+  border: 1px solid #141414 !important;
+}
+
+.fc .fc-event {
+  border-radius: 0px !important;
+  border: 1px solid #141414 !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
+  padding: 1px 4px !important;
+}

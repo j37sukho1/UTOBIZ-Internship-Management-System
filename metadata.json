@@ -1,0 +1,8 @@
+{
+  "name": "Remix: 인턴 업무 보고 및 관리 시스템",
+  "description": "Supabase 데이터베이스와 Auth 환경을 100% 연동한 통합 인턴 업무 지시, 일정 플래닝 및 구글 스프레드시트 양식의 일일 업무 보고서 관리 시스템",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
